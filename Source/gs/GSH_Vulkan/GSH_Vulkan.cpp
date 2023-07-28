@@ -253,16 +253,16 @@ void CGSH_Vulkan::MarkNewFrame()
 	CGSHandler::MarkNewFrame();
 }
 
-void CGSH_Vulkan::FlipImpl()
+void CGSH_Vulkan::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
 	if(m_present)
 	{
 		m_present->SetPresentationViewport(GetPresentationViewport());
-		m_present->DoPresent(GetCurrentDisplayInfo());
+		m_present->DoPresent(dispInfo);
 	}
 
 	PresentBackbuffer();
-	CGSHandler::FlipImpl();
+	CGSHandler::FlipImpl(dispInfo);
 }
 
 std::vector<VkPhysicalDevice> CGSH_Vulkan::GetPhysicalDevices()
