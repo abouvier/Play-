@@ -1,8 +1,10 @@
+#include "GSH_Vulkan.h"
 #include <cstring>
+#include "std_experimental_map.h"
 #include "../GsPixelFormats.h"
+#include "../GsTransferRange.h"
 #include "../../Log.h"
 #include "../../AppConfig.h"
-#include "GSH_Vulkan.h"
 #include "GSH_VulkanPlatformDefs.h"
 #include "GSH_VulkanDrawDesktop.h"
 #include "GSH_VulkanDrawMobile.h"
@@ -142,6 +144,7 @@ void CGSH_Vulkan::InitializeImpl()
 	m_swizzleTablePSMT4 = CreateSwizzleTable<CGsPixelFormats::STORAGEPSMT4>(m_context->device, m_context->physicalDeviceMemoryProperties, m_context->queue, m_context->commandBufferPool);
 	m_swizzleTablePSMZ32 = CreateSwizzleTable<CGsPixelFormats::STORAGEPSMZ32>(m_context->device, m_context->physicalDeviceMemoryProperties, m_context->queue, m_context->commandBufferPool);
 	m_swizzleTablePSMZ16 = CreateSwizzleTable<CGsPixelFormats::STORAGEPSMZ16>(m_context->device, m_context->physicalDeviceMemoryProperties, m_context->queue, m_context->commandBufferPool);
+	m_swizzleTablePSMZ16S = CreateSwizzleTable<CGsPixelFormats::STORAGEPSMZ16S>(m_context->device, m_context->physicalDeviceMemoryProperties, m_context->queue, m_context->commandBufferPool);
 
 	m_context->swizzleTablePSMCT32View = m_swizzleTablePSMCT32.CreateImageView();
 	m_context->swizzleTablePSMCT16View = m_swizzleTablePSMCT16.CreateImageView();
@@ -150,6 +153,7 @@ void CGSH_Vulkan::InitializeImpl()
 	m_context->swizzleTablePSMT4View = m_swizzleTablePSMT4.CreateImageView();
 	m_context->swizzleTablePSMZ32View = m_swizzleTablePSMZ32.CreateImageView();
 	m_context->swizzleTablePSMZ16View = m_swizzleTablePSMZ16.CreateImageView();
+	m_context->swizzleTablePSMZ16SView = m_swizzleTablePSMZ16S.CreateImageView();
 
 	m_context->SetImageName(m_swizzleTablePSMCT32, "Swizzle Table PSMCT32");
 	m_context->SetImageName(m_swizzleTablePSMCT16, "Swizzle Table PSMCT16");
@@ -158,6 +162,7 @@ void CGSH_Vulkan::InitializeImpl()
 	m_context->SetImageName(m_swizzleTablePSMT4, "Swizzle Table PSMT4");
 	m_context->SetImageName(m_swizzleTablePSMZ32, "Swizzle Table PSMZ32");
 	m_context->SetImageName(m_swizzleTablePSMZ16, "Swizzle Table PSMZ16");
+	m_context->SetImageName(m_swizzleTablePSMZ16S, "Swizzle Table PSMZ16S");
 
 	m_context->SetImageViewName(m_context->swizzleTablePSMCT32View, "Swizzle Table View PSMCT32");
 	m_context->SetImageViewName(m_context->swizzleTablePSMCT16View, "Swizzle Table View PSMCT16");
@@ -166,6 +171,7 @@ void CGSH_Vulkan::InitializeImpl()
 	m_context->SetImageViewName(m_context->swizzleTablePSMT4View, "Swizzle Table View PSMT4");
 	m_context->SetImageViewName(m_context->swizzleTablePSMZ32View, "Swizzle Table View PSMZ32");
 	m_context->SetImageViewName(m_context->swizzleTablePSMZ16View, "Swizzle Table View PSMZ16");
+	m_context->SetImageViewName(m_context->swizzleTablePSMZ16SView, "Swizzle Table View PSMZ16S");
 
 	m_frameCommandBuffer = std::make_shared<CFrameCommandBuffer>(m_context);
 	m_clutLoad = std::make_shared<CClutLoad>(m_context, m_frameCommandBuffer);
@@ -209,6 +215,7 @@ void CGSH_Vulkan::ReleaseImpl()
 	m_context->device.vkDestroyImageView(m_context->device, m_context->swizzleTablePSMT4View, nullptr);
 	m_context->device.vkDestroyImageView(m_context->device, m_context->swizzleTablePSMZ32View, nullptr);
 	m_context->device.vkDestroyImageView(m_context->device, m_context->swizzleTablePSMZ16View, nullptr);
+	m_context->device.vkDestroyImageView(m_context->device, m_context->swizzleTablePSMZ16SView, nullptr);
 
 	m_swizzleTablePSMCT32.Reset();
 	m_swizzleTablePSMCT16.Reset();
@@ -217,11 +224,13 @@ void CGSH_Vulkan::ReleaseImpl()
 	m_swizzleTablePSMT4.Reset();
 	m_swizzleTablePSMZ32.Reset();
 	m_swizzleTablePSMZ16.Reset();
+	m_swizzleTablePSMZ16S.Reset();
 
 	m_context->device.vkDestroyDescriptorPool(m_context->device, m_context->descriptorPool, nullptr);
 	m_context->clutBuffer.Reset();
 	m_context->memoryBuffer.Reset();
 	m_context->memoryBufferCopy.Reset();
+	m_context->memoryBufferTransfer.Reset();
 	m_context->commandBufferPool.Reset();
 	m_context->device.Reset();
 
@@ -262,6 +271,12 @@ void CGSH_Vulkan::FlipImpl(const DISPLAY_INFO& dispInfo)
 	}
 
 	PresentBackbuffer();
+	for(auto& xferHistoryPair : m_xferHistory)
+	{
+		xferHistoryPair.second.Advance();
+	}
+	std::experimental::erase_if(m_xferHistory,
+	                            [](const auto& xferTrackerPair) { return xferTrackerPair.second.IsEmpty(); });
 	CGSHandler::FlipImpl(dispInfo);
 }
 
@@ -535,6 +550,13 @@ void CGSH_Vulkan::CreateMemoryBuffer()
 	                                                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 	                                                         RAMSIZE);
 	m_context->SetBufferName(m_context->memoryBufferCopy, "GS Memory Copy");
+
+	m_context->memoryBufferTransfer = Framework::Vulkan::CBuffer(m_context->device,
+	                                                             m_context->physicalDeviceMemoryProperties,
+	                                                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+	                                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+	                                                             RAMSIZE);
+	m_context->SetBufferName(m_context->memoryBufferTransfer, "GS Memory Transfer");
 }
 
 void CGSH_Vulkan::CreateClutBuffer()
@@ -1306,8 +1328,65 @@ void CGSH_Vulkan::ProcessLocalToHostTransfer()
 	bool readsEnabled = CAppConfig::GetInstance().GetPreferenceBoolean(PREF_CGSHANDLER_GS_RAM_READS_ENABLED);
 	if(readsEnabled)
 	{
-		//Make sure our local RAM copy is in sync with GPU
-		SyncMemoryCache();
+		m_draw->FlushRenderPass();
+
+		auto bltBuf = make_convertible<BITBLTBUF>(m_nReg[GS_REG_BITBLTBUF]);
+		auto trxReg = make_convertible<TRXREG>(m_nReg[GS_REG_TRXREG]);
+		auto trxPos = make_convertible<TRXPOS>(m_nReg[GS_REG_TRXPOS]);
+
+		m_xferHistory.insert(std::make_pair(bltBuf, LOCAL_TO_HOST_XFER_HISTORY{}));
+		auto transfer = m_xferHistory.find(bltBuf);
+		transfer->second.MarkUsed();
+
+		auto [copyBase, copySize] = GsTransfer::GetSrcRange(bltBuf, trxReg, trxPos);
+
+		//Some games do that, example: Star Ocean 3
+		assert((copyBase + copySize) <= RAMSIZE);
+		if(copyBase >= RAMSIZE)
+		{
+			//Huh, something really wierd happened
+			return;
+		}
+		if((copyBase + copySize) > RAMSIZE)
+		{
+			copySize = RAMSIZE - copyBase;
+		}
+
+		auto& srcBuffer = m_context->memoryBuffer;
+		auto& dstBuffer = m_context->memoryBufferTransfer;
+
+		auto commandBuffer = m_frameCommandBuffer->GetCommandBuffer();
+
+		{
+			auto memoryBarrier = Framework::Vulkan::MemoryBarrier();
+			memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+			m_context->device.vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+			                                       0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+		}
+
+		{
+			VkBufferCopy bufferCopy = {};
+			bufferCopy.size = copySize;
+			bufferCopy.dstOffset = copyBase;
+			bufferCopy.srcOffset = copyBase;
+			m_context->device.vkCmdCopyBuffer(commandBuffer, srcBuffer, dstBuffer, 1, &bufferCopy);
+		}
+
+		if(!transfer->second.IsRecurring())
+		{
+			m_frameCommandBuffer->Flush();
+			m_context->device.vkQueueWaitIdle(m_context->queue);
+		}
+
+		void* bufferPtr = nullptr;
+		auto result = m_context->device.vkMapMemory(m_context->device, dstBuffer.GetMemory(), copyBase, copySize, 0, &bufferPtr);
+		CHECKVULKANERROR(result);
+
+		memcpy(m_memoryCache + copyBase, bufferPtr, copySize);
+
+		m_context->device.vkUnmapMemory(m_context->device, dstBuffer.GetMemory());
 	}
 }
 
@@ -1540,8 +1619,8 @@ Framework::CBitmap CGSH_Vulkan::GetDepthbufferImpl(uint64 frameReg, uint64 zbufR
 	break;
 	case PSMZ16S:
 	{
-		bitmap = ReadImage16<CGsPixelFormats::CPixelIndexorPSMCT16S>(GetRam(), zbuf.GetBasePtr(),
-		                                                             frame.nWidth, frameWidth, frameHeight);
+		bitmap = ReadImage16<CGsPixelFormats::CPixelIndexorPSMZ16S>(GetRam(), zbuf.GetBasePtr(),
+		                                                            frame.nWidth, frameWidth, frameHeight);
 	}
 	break;
 	default:

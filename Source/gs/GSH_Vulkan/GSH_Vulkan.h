@@ -11,6 +11,8 @@
 #include "GSH_VulkanTransferHost.h"
 #include "GSH_VulkanTransferLocal.h"
 #include <vector>
+#include <map>
+#include <cstring>
 #include "../GSHandler.h"
 #include "../GsDebuggerInterface.h"
 #include "../GsCachedArea.h"
@@ -86,6 +88,45 @@ private:
 	enum
 	{
 		CLUT_CACHE_SIZE = 32,
+	};
+
+	struct LOCAL_TO_HOST_XFER_HISTORY
+	{
+		static constexpr int MAX_FRAME_COUNT = 16;
+		static constexpr int RECURRING_THRESHOLD = 4;
+
+		std::array<bool, MAX_FRAME_COUNT> used = {};
+		int frameCount = 0;
+
+		void Advance()
+		{
+			frameCount++;
+			if(frameCount == MAX_FRAME_COUNT)
+			{
+				memmove(used.data(), used.data() + 1, sizeof(bool) * MAX_FRAME_COUNT - 1);
+				frameCount--;
+				used[frameCount] = false;
+			}
+		}
+
+		void MarkUsed()
+		{
+			used[frameCount] = true;
+		}
+
+		bool IsRecurring() const
+		{
+			if(frameCount != (MAX_FRAME_COUNT - 1)) return false;
+			auto result = std::count_if(std::begin(used), std::end(used), [](bool used) { return used; });
+			return result >= RECURRING_THRESHOLD;
+		}
+
+		bool IsEmpty() const
+		{
+			if(frameCount != (MAX_FRAME_COUNT - 1)) return false;
+			auto result = std::count_if(std::begin(used), std::end(used), [](bool used) { return used; });
+			return result == 0;
+		}
 	};
 
 	virtual void PresentBackbuffer() = 0;
@@ -200,6 +241,7 @@ private:
 	CLUTKEY m_clutStates[CLUT_CACHE_SIZE];
 	uint32 m_nextClutCacheIndex = 0;
 	std::vector<uint8> m_xferBuffer;
+	std::map<uint64, LOCAL_TO_HOST_XFER_HISTORY> m_xferHistory;
 
 	//Optimization for Virtua Fighter 2, Sega Rally 95
 	float m_lastLineU = 0;
@@ -218,4 +260,5 @@ private:
 	Framework::Vulkan::CImage m_swizzleTablePSMT4;
 	Framework::Vulkan::CImage m_swizzleTablePSMZ32;
 	Framework::Vulkan::CImage m_swizzleTablePSMZ16;
+	Framework::Vulkan::CImage m_swizzleTablePSMZ16S;
 };

@@ -893,8 +893,6 @@ public:
 	DISPLAY_RECT GetDisplayRect(uint64) const;
 	DISPLAY_INFO GetCurrentDisplayInfo();
 
-	static std::pair<uint32, uint32> GetTransferInvalidationRange(const BITBLTBUF&, const TRXREG&, const TRXPOS&);
-
 	virtual Framework::CBitmap GetScreenshot();
 
 	void SendGSCall(CMailBox::FunctionType&&);
@@ -1060,7 +1058,8 @@ protected:
 	void TransferReadHandlerInvalid(void*, uint32);
 	template <typename Storage>
 	void TransferReadHandlerGeneric(void*, uint32);
-	void TransferReadHandlerPSMCT24(void*, uint32);
+	template <typename Storage>
+	void TransferReadHandler24(void*, uint32);
 	void TransferReadHandlerPSMT8H(void*, uint32);
 
 	virtual void SyncCLUT(const TEX0&);
