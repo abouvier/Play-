@@ -217,7 +217,7 @@ void QtFramedebugger::UpdateDisplay(int32 targetCmdIndex)
 	}
 
 	m_gs->ProcessWriteBuffer(nullptr);
-	m_gs->Finish();
+	m_gs->Finish(true);
 
 	const auto& drawingKicks = m_frameDump.GetDrawingKicks();
 	if(!drawingKicks.empty())

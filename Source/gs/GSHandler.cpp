@@ -70,7 +70,10 @@ CGSHandler::CGSHandler(bool gsThreaded)
 
 	m_pRAM = new uint8[RAMSIZE];
 	m_pCLUT = new uint16[CLUTENTRYCOUNT];
-	m_writeBuffer = new RegisterWrite[REGISTERWRITEBUFFER_SIZE];
+	for(int i = 0; i < MAX_INFLIGHT_FRAMES; i++)
+	{
+		m_writeBuffers[i] = new RegisterWrite[REGISTERWRITEBUFFER_SIZE];
+	}
 
 	for(int i = 0; i < PSM_MAX; i++)
 	{
@@ -113,7 +116,10 @@ CGSHandler::~CGSHandler()
 	}
 	delete[] m_pRAM;
 	delete[] m_pCLUT;
-	delete[] m_writeBuffer;
+	for(int i = 0; i < MAX_INFLIGHT_FRAMES; i++)
+	{
+		delete[] m_writeBuffers[i];
+	}
 }
 
 void CGSHandler::RegisterPreferences()
@@ -162,10 +168,14 @@ void CGSHandler::ResetBase()
 	m_crtMode = CRT_MODE_NTSC;
 	m_nCBP0 = 0;
 	m_nCBP1 = 0;
+#ifdef _DEBUG
 	m_transferCount = 0;
+#endif
 	m_writeBufferSize = 0;
 	m_writeBufferProcessIndex = 0;
 	m_writeBufferSubmitIndex = 0;
+	m_writeBufferIndex = 0;
+	m_currentWriteBuffer = m_writeBuffers[m_writeBufferIndex];
 }
 
 void CGSHandler::ResetImpl()
@@ -366,6 +376,7 @@ void CGSHandler::SetVBlank()
 {
 	{
 		Finish();
+		Flip();
 	}
 
 	std::lock_guard registerMutexLock(m_registerMutex);
@@ -379,11 +390,6 @@ void CGSHandler::ResetVBlank()
 
 	//Alternate current field
 	m_nCSR ^= CSR_FIELD;
-}
-
-int CGSHandler::GetPendingTransferCount() const
-{
-	return m_transferCount;
 }
 
 void CGSHandler::NotifyEvent(uint32 eventBit)
@@ -514,19 +520,37 @@ void CGSHandler::Release()
 	SendGSCall(std::bind(&CGSHandler::ReleaseImpl, this), true);
 }
 
-void CGSHandler::Finish()
+void CGSHandler::Finish(bool forceWait)
 {
 	FlushWriteBuffer();
 	SendGSCall(std::bind(&CGSHandler::MarkNewFrame, this));
-	Flip(true);
+	m_framesInFlight++;
+	bool wait = (m_framesInFlight == MAX_INFLIGHT_FRAMES);
+	wait |= forceWait;
+	SendGSCall(
+	    [this]() {
+		    assert(m_framesInFlight != 0);
+		    m_framesInFlight--;
+	    },
+	    wait, wait);
 }
 
-void CGSHandler::Flip(bool waitForCompletion)
+void CGSHandler::Flip(uint32 flags)
 {
-	SendGSCall(std::bind(&CGSHandler::FlipImpl, this), waitForCompletion, waitForCompletion);
+	bool waitForCompletion = (flags & FLIP_FLAG_WAIT) != 0;
+	bool force = (flags & FLIP_FLAG_FORCE) != 0;
+	SendGSCall(
+	    [this, displayInfo = GetCurrentDisplayInfo(), force]() {
+		    if(force || m_regsDirty)
+		    {
+			    FlipImpl(displayInfo);
+		    }
+		    m_regsDirty = false;
+	    },
+	    waitForCompletion, waitForCompletion);
 }
 
-void CGSHandler::FlipImpl()
+void CGSHandler::FlipImpl(const DISPLAY_INFO&)
 {
 	OnFlipComplete();
 	m_flipped = true;
@@ -571,7 +595,9 @@ void CGSHandler::FeedImageData(const void* data, uint32 length)
 	assert(m_writeBufferProcessIndex == m_writeBufferSize);
 	SubmitWriteBuffer();
 
+#ifdef _DEBUG
 	m_transferCount++;
+#endif
 
 	//Allocate 0x10 more bytes to allow transfer handlers
 	//to read beyond the actual length of the buffer (ie.: PSMCT24)
@@ -607,13 +633,13 @@ void CGSHandler::ProcessWriteBuffer(const CGsPacketMetadata* metadata)
 		uint32 packetSize = m_writeBufferSize - m_writeBufferProcessIndex;
 		if(packetSize != 0)
 		{
-			m_frameDump->AddRegisterPacket(m_writeBuffer + m_writeBufferProcessIndex, packetSize, metadata);
+			m_frameDump->AddRegisterPacket(m_currentWriteBuffer + m_writeBufferProcessIndex, packetSize, metadata);
 		}
 	}
 #endif
 	for(uint32 writeIndex = m_writeBufferProcessIndex; writeIndex < m_writeBufferSize; writeIndex++)
 	{
-		const auto& write = m_writeBuffer[writeIndex];
+		const auto& write = m_currentWriteBuffer[writeIndex];
 		switch(write.first)
 		{
 		case GS_REG_SIGNAL:
@@ -656,13 +682,16 @@ void CGSHandler::SubmitWriteBuffer()
 	assert(m_writeBufferSubmitIndex <= m_writeBufferSize);
 	if(m_writeBufferSubmitIndex == m_writeBufferSize) return;
 
+#ifdef _DEBUG
 	m_transferCount++;
-	uint32 bufferStartIndex = m_writeBufferSubmitIndex;
-	uint32 bufferEndIndex = m_writeBufferSize;
+#endif
+
+	auto bufferStart = m_currentWriteBuffer + m_writeBufferSubmitIndex;
+	auto bufferEnd = m_currentWriteBuffer + m_writeBufferSize;
 
 	SendGSCall(
-	    [this, bufferStartIndex, bufferEndIndex]() {
-		    SubmitWriteBufferImpl(bufferStartIndex, bufferEndIndex);
+	    [this, bufferStart, bufferEnd]() {
+		    SubmitWriteBufferImpl(bufferStart, bufferEnd);
 	    });
 
 	m_writeBufferSubmitIndex = m_writeBufferSize;
@@ -677,6 +706,9 @@ void CGSHandler::FlushWriteBuffer()
 	m_writeBufferSize = 0;
 	m_writeBufferProcessIndex = 0;
 	m_writeBufferSubmitIndex = 0;
+	m_writeBufferIndex++;
+	m_writeBufferIndex %= MAX_INFLIGHT_FRAMES;
+	m_currentWriteBuffer = m_writeBuffers[m_writeBufferIndex];
 	//Nothing should be written to the buffer after that
 }
 
@@ -684,6 +716,7 @@ void CGSHandler::WriteRegisterImpl(uint8 nRegister, uint64 nData)
 {
 	nRegister &= REGISTER_MAX - 1;
 	m_nReg[nRegister] = nData;
+	m_regsDirty = true;
 
 	switch(nRegister)
 	{
@@ -718,7 +751,9 @@ void CGSHandler::WriteRegisterImpl(uint8 nRegister, uint64 nData)
 		break;
 
 	case GS_REG_HWREG:
+#ifdef _DEBUG
 		m_transferCount++;
+#endif
 		FeedImageDataImpl(reinterpret_cast<const uint8*>(&nData), 8);
 		break;
 	}
@@ -741,8 +776,6 @@ void CGSHandler::FeedImageDataImpl(const uint8* imageData, uint32 length)
 		if(m_trxCtx.nSize < length)
 		{
 			length = m_trxCtx.nSize;
-			//assert(0);
-			//return;
 		}
 
 		TransferWrite(imageData, length);
@@ -759,8 +792,10 @@ void CGSHandler::FeedImageDataImpl(const uint8* imageData, uint32 length)
 		}
 	}
 
+#ifdef _DEBUG
 	assert(m_transferCount != 0);
 	m_transferCount--;
+#endif
 }
 
 void CGSHandler::ReadImageDataImpl(void* ptr, uint32 size)
@@ -774,16 +809,17 @@ void CGSHandler::ReadImageDataImpl(void* ptr, uint32 size)
 	((this)->*(m_transferReadHandlers[bltBuf.nSrcPsm]))(ptr, size);
 }
 
-void CGSHandler::SubmitWriteBufferImpl(uint32 bufferStartIndex, uint32 bufferEndIndex)
+void CGSHandler::SubmitWriteBufferImpl(const RegisterWrite* writeStart, const RegisterWrite* writeEnd)
 {
-	for(uint32 i = bufferStartIndex; i < bufferEndIndex; i++)
+	for(auto write = writeStart; write != writeEnd; write++)
 	{
-		const auto& write = m_writeBuffer[i];
-		WriteRegisterImpl(write.first, write.second);
+		WriteRegisterImpl(write->first, write->second);
 	}
 
+#ifdef _DEBUG
 	assert(m_transferCount != 0);
 	m_transferCount--;
+#endif
 }
 
 std::pair<uint32, uint32> CGSHandler::GetTransferInvalidationRange(const BITBLTBUF& bltBuf, const TRXREG& trxReg, const TRXPOS& trxPos)

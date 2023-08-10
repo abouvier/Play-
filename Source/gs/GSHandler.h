@@ -183,6 +183,12 @@ public:
 		uint32 height = 0;
 	};
 
+	enum FLIP_FLAGS
+	{
+		FLIP_FLAG_WAIT = 0x01, //Wait for flip operation to be complete
+		FLIP_FLAG_FORCE = 0x02, //Force swapping/presenting on graphics API even if nothing was drawn this frame
+	};
+
 	enum PSM
 	{
 		PSMCT32 = 0x00,
@@ -849,7 +855,7 @@ public:
 	{
 		assert(m_writeBufferSize < REGISTERWRITEBUFFER_SIZE);
 		if(m_writeBufferSize == REGISTERWRITEBUFFER_SIZE) return;
-		m_writeBuffer[m_writeBufferSize++] = write;
+		m_currentWriteBuffer[m_writeBufferSize++] = write;
 	}
 
 	void ProcessWriteBuffer(const CGsPacketMetadata*);
@@ -863,8 +869,8 @@ public:
 	virtual void ProcessLocalToHostTransfer() = 0;
 	virtual void ProcessLocalToLocalTransfer() = 0;
 	virtual void ProcessClutTransfer(uint32, uint32) = 0;
-	void Flip(bool = false);
-	void Finish();
+	void Flip(uint32 = 0);
+	void Finish(bool = false);
 
 	void MakeLinearCLUT(const TEX0&, std::array<uint32, 256>&) const;
 
@@ -876,7 +882,6 @@ public:
 
 	uint64 GetBUSDIR() const;
 
-	int GetPendingTransferCount() const;
 	void NotifyEvent(uint32);
 
 	unsigned int GetCrtWidth() const;
@@ -1025,12 +1030,12 @@ protected:
 	void ResetBase();
 	virtual void ResetImpl();
 	virtual void NotifyPreferencesChangedImpl();
-	virtual void FlipImpl();
+	virtual void FlipImpl(const DISPLAY_INFO&);
 	virtual void MarkNewFrame();
 	virtual void WriteRegisterImpl(uint8, uint64);
 	void FeedImageDataImpl(const uint8*, uint32);
 	void ReadImageDataImpl(void*, uint32);
-	void SubmitWriteBufferImpl(uint32, uint32);
+	void SubmitWriteBufferImpl(const RegisterWrite*, const RegisterWrite*);
 
 	void BeginTransfer();
 
@@ -1096,8 +1101,11 @@ protected:
 
 	uint32 m_drawCallCount = 0;
 
-	//Rename to register write buffer?
-	RegisterWrite* m_writeBuffer;
+	static constexpr int MAX_INFLIGHT_FRAMES = 2;
+	RegisterWrite* m_writeBuffers[MAX_INFLIGHT_FRAMES] = {};
+
+	RegisterWrite* m_currentWriteBuffer = nullptr;
+	uint32 m_writeBufferIndex = 0;
 	uint32 m_writeBufferSize = 0;
 	uint32 m_writeBufferProcessIndex = 0;
 	uint32 m_writeBufferSubmitIndex = 0;
@@ -1105,9 +1113,13 @@ protected:
 	CRT_MODE m_crtMode;
 	std::thread m_thread;
 	std::recursive_mutex m_registerMutex;
+#ifdef _DEBUG
 	std::atomic<int> m_transferCount;
+#endif
+	std::atomic<int> m_framesInFlight;
 	bool m_threadDone = false;
 	CFrameDump* m_frameDump = nullptr;
+	bool m_regsDirty = false;
 	bool m_drawEnabled = true;
 	CINTC* m_intc = nullptr;
 	bool m_gsThreaded = true;

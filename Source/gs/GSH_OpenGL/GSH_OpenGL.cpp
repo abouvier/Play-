@@ -122,13 +122,12 @@ void CGSH_OpenGL::ResetImpl()
 	m_primitiveType = PRIM_INVALID;
 }
 
-void CGSH_OpenGL::FlipImpl()
+void CGSH_OpenGL::FlipImpl(const DISPLAY_INFO& dispInfo)
 {
 	FlushVertexBuffer();
 	m_renderState.isValid = false;
 	m_validGlState = 0;
 
-	auto dispInfo = GetCurrentDisplayInfo();
 	const auto& dispLayer = dispInfo.layers[0];
 
 	FramebufferPtr framebuffer;
@@ -231,7 +230,7 @@ void CGSH_OpenGL::FlipImpl()
 	}
 
 	PresentBackbuffer();
-	CGSHandler::FlipImpl();
+	CGSHandler::FlipImpl(dispInfo);
 }
 
 void CGSH_OpenGL::LoadState(Framework::CZipArchiveReader& archive)
